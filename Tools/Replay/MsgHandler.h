@@ -1,7 +1,8 @@
 #ifndef AP_MSGHANDLER_H
 #define AP_MSGHANDLER_H
 
-#include <DataFlash.h>
+#include <DataFlash/DataFlash.h>
+#include "VehicleType.h"
 
 #include <stdio.h>
 
@@ -12,13 +13,10 @@
 class MsgHandler {
 public:
     // constructor - create a parser for a MavLink message format
-    MsgHandler(struct log_Format &f, DataFlash_Class &_dataflash,
-               uint64_t &last_timestamp_usec);
+    MsgHandler(const struct log_Format &f);
 
     // retrieve a comma-separated list of all labels
     void string_for_labels(char *buffer, uint bufferlen);
-
-    virtual void process_message(uint8_t *msg) = 0;
 
     // field_value - retrieve the value of a field from the supplied message
     // these return false if the field was not found
@@ -33,10 +31,7 @@ public:
     void require_field(uint8_t *msg, const char *label, R &ret)
         {   
             if (! field_value(msg, label, ret)) {
-                char all_labels[256];
-                string_for_labels(all_labels, 256);
-                ::printf("Field (%s) not found; options are (%s)\n", label, all_labels);
-                exit(1);
+                field_not_found(msg, label);
             }
         }
     void require_field(uint8_t *msg, const char *label, char *buffer, uint8_t bufferlen);
@@ -45,8 +40,6 @@ public:
     int32_t require_field_int32_t(uint8_t *msg, const char *label);
     uint16_t require_field_uint16_t(uint8_t *msg, const char *label);
     int16_t require_field_int16_t(uint8_t *msg, const char *label);
-
-    bool set_parameter(const char *name, float value);
 
 private:
 
@@ -78,9 +71,6 @@ private:
 protected:
     struct log_Format f; // the format we are a parser for
     ~MsgHandler();
-    void wait_timestamp(uint32_t timestamp);
-
-    uint64_t &last_timestamp_usec;
 
     void location_from_msg(uint8_t *msg, Location &loc, const char *label_lat,
 			   const char *label_long, const char *label_alt);
@@ -90,14 +80,13 @@ protected:
 			     const char *label_speed,
 			     const char *label_course,
 			     const char *label_vz);
-    DataFlash_Class &dataflash;
-    void wait_timestamp_from_msg(uint8_t *msg);
 
     void attitude_from_msg(uint8_t *msg,
 			   Vector3f &att,
 			   const char *label_roll,
 			   const char *label_pitch,
 			   const char *label_yaw);
+    void field_not_found(uint8_t *msg, const char *label);
 };
 
 template<typename R>
@@ -151,6 +140,12 @@ inline void MsgHandler::field_value_for_type_at_offset(uint8_t *msg,
     case 'L':
     case 'e':
         ret = (R)(((int32_t*)&msg[offset])[0]);
+        break;
+    case 'q':
+        ret = (R)(((int64_t*)&msg[offset])[0]);
+        break;
+    case 'Q':
+        ret = (R)(((uint64_t*)&msg[offset])[0]);
         break;
     default:
         ::printf("Unhandled format type (%c)\n", type);

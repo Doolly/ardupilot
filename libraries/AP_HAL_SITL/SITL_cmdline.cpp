@@ -1,26 +1,35 @@
 /// -*- tab-width: 4; Mode: C++; c-basic-offset: 4; indent-tabs-mode: nil -*-
 
-#include <AP_HAL.h>
+#include <AP_HAL/AP_HAL.h>
 
 #if CONFIG_HAL_BOARD == HAL_BOARD_SITL
 
-#include <AP_HAL_SITL.h>
+#include "AP_HAL_SITL.h"
 #include "AP_HAL_SITL_Namespace.h"
 #include "HAL_SITL_Class.h"
 #include "UARTDriver.h"
 #include <stdio.h>
 #include <signal.h>
 #include <unistd.h>
-#include <utility/getopt_cpp.h>
+#include <AP_HAL/utility/getopt_cpp.h>
 
-#include <SIM_Multicopter.h>
-#include <SIM_Helicopter.h>
-#include <SIM_Rover.h>
-#include <SIM_CRRCSim.h>
+#include <SITL/SIM_Multicopter.h>
+#include <SITL/SIM_Helicopter.h>
+#include <SITL/SIM_Plane.h>
+#include <SITL/SIM_QuadPlane.h>
+#include <SITL/SIM_Rover.h>
+#include <SITL/SIM_CRRCSim.h>
+#include <SITL/SIM_Gazebo.h>
+#include <SITL/SIM_last_letter.h>
+#include <SITL/SIM_JSBSim.h>
+#include <SITL/SIM_Tracker.h>
+#include <SITL/SIM_Balloon.h>
+#include <SITL/SIM_FlightAxis.h>
 
 extern const AP_HAL::HAL& hal;
 
 using namespace HALSITL;
+using namespace SITL;
 
 // catch floating point exceptions
 static void _sig_fpe(int signum)
@@ -31,37 +40,63 @@ static void _sig_fpe(int signum)
 
 void SITL_State::_usage(void)
 {
-    fprintf(stdout, "Options:\n");
-    fprintf(stdout, "\t-w          wipe eeprom and dataflash\n");
-    fprintf(stdout, "\t-r RATE     set SITL framerate\n");
-    fprintf(stdout, "\t-H HEIGHT   initial barometric height\n");
-    fprintf(stdout, "\t-C          use console instead of TCP ports\n");
-    fprintf(stdout, "\t-I          set instance of SITL (adds 10*instance to all port numbers)\n");
-    fprintf(stdout, "\t-s SPEEDUP  simulation speedup\n");
-    fprintf(stdout, "\t-O ORIGIN   set home location (lat,lng,alt,yaw)\n");
-    fprintf(stdout, "\t-M MODEL    set simulation model\n");
-    fprintf(stdout, "\t-F FDMADDR  set FDM UDP address (IPv4)\n");
+    printf("Options:\n"
+           "\t--home HOME        set home location (lat,lng,alt,yaw)\n"
+           "\t--model MODEL      set simulation model\n"
+           "\t--wipe             wipe eeprom and dataflash\n"
+           "\t--rate RATE        set SITL framerate\n"
+           "\t--console          use console instead of TCP ports\n"
+           "\t--instance N       set instance of SITL (adds 10*instance to all port numbers)\n"
+           "\t--speedup SPEEDUP  set simulation speedup\n"
+           "\t--gimbal           enable simulated MAVLink gimbal\n"
+           "\t--adsb             enable simulated ADSB peripheral\n"
+           "\t--autotest-dir DIR set directory for additional files\n"
+           "\t--uartA device     set device string for UARTA\n"
+           "\t--uartB device     set device string for UARTB\n"
+           "\t--uartC device     set device string for UARTC\n"
+           "\t--uartD device     set device string for UARTD\n"
+           "\t--uartE device     set device string for UARTE\n"
+           "\t--defaults path    set path to defaults file\n"
+        );
 }
 
 static const struct {
     const char *name;
     Aircraft *(*constructor)(const char *home_str, const char *frame_str);
 } model_constructors[] = {
-    { "+",         MultiCopter::create },
-    { "x",         MultiCopter::create },
-    { "hexa",      MultiCopter::create },
-    { "octa",      MultiCopter::create },
-    { "heli",      Helicopter::create },
-    { "rover",     Rover::create },
-    { "crrcsim",   CRRCSim::create }
+    { "quadplane",          QuadPlane::create },
+    { "+",                  MultiCopter::create },
+    { "quad",               MultiCopter::create },
+    { "copter",             MultiCopter::create },
+    { "x",                  MultiCopter::create },
+    { "hexa",               MultiCopter::create },
+    { "octa",               MultiCopter::create },
+    { "heli",               Helicopter::create },
+    { "heli-dual",          Helicopter::create },
+    { "heli-compound",      Helicopter::create },
+    { "rover",              SimRover::create },
+    { "crrcsim",            CRRCSim::create },
+    { "jsbsim",             JSBSim::create },
+    { "flightaxis",         FlightAxis::create },
+    { "gazebo",             Gazebo::create },
+    { "last_letter",        last_letter::create },
+    { "tracker",            Tracker::create },
+    { "balloon",            Balloon::create },
+    { "plane",              Plane::create },
 };
 
 void SITL_State::_parse_command_line(int argc, char * const argv[])
 {
     int opt;
-    const char *home_str = NULL;
+    // default to CMAC
+    const char *home_str = "-35.363261,149.165230,584,353";
     const char *model_str = NULL;
+    char *autotest_dir = NULL;
     float speedup = 1.0f;
+
+    if (asprintf(&autotest_dir, SKETCHBOOK "/Tools/autotest") <= 0) {
+        AP_HAL::panic("out of memory");
+    }
 
     signal(SIGFPE, _sig_fpe);
     // No-op SIGPIPE handler
@@ -75,24 +110,47 @@ void SITL_State::_parse_command_line(int argc, char * const argv[])
     _rcout_port = 5502;
     _simin_port = 5501;
     _fdm_address = "127.0.0.1";
+    _client_address = NULL;
+    _instance = 0;
+
+    enum long_options {
+        CMDLINE_CLIENT=0,
+        CMDLINE_GIMBAL,
+        CMDLINE_AUTOTESTDIR,
+        CMDLINE_UARTA,
+        CMDLINE_UARTB,
+        CMDLINE_UARTC,
+        CMDLINE_UARTD,
+        CMDLINE_UARTE,
+        CMDLINE_ADSB,
+        CMDLINE_DEFAULTS
+    };
 
     const struct GetOptLong::option options[] = {
         {"help",            false,  0, 'h'},
         {"wipe",            false,  0, 'w'},
         {"speedup",         true,   0, 's'},
         {"rate",            true,   0, 'r'},
-        {"height",          true,   0, 'H'},
         {"console",         false,  0, 'C'},
         {"instance",        true,   0, 'I'},
         {"param",           true,   0, 'P'},
         {"synthetic-clock", false,  0, 'S'},
         {"home",            true,   0, 'O'},
         {"model",           true,   0, 'M'},
-        {"frame",           true,   0, 'F'},
+        {"uartA",           true,   0, CMDLINE_UARTA},
+        {"uartB",           true,   0, CMDLINE_UARTB},
+        {"uartC",           true,   0, CMDLINE_UARTC},
+        {"uartD",           true,   0, CMDLINE_UARTD},
+        {"uartE",           true,   0, CMDLINE_UARTE},
+        {"client",          true,   0, CMDLINE_CLIENT},
+        {"gimbal",          false,  0, CMDLINE_GIMBAL},
+        {"adsb",            false,  0, CMDLINE_ADSB},
+        {"autotest-dir",    true,   0, CMDLINE_AUTOTESTDIR},
+        {"defaults",        true,   0, CMDLINE_DEFAULTS},
         {0, false, 0, 0}
     };
 
-    GetOptLong gopt(argc, argv, "hws:r:H:CI:P:SO:M:F:",
+    GetOptLong gopt(argc, argv, "hws:r:CI:P:SO:M:F:",
                     options);
 
     while ((opt = gopt.getoption()) != -1) {
@@ -104,17 +162,14 @@ void SITL_State::_parse_command_line(int argc, char * const argv[])
         case 'r':
             _framerate = (unsigned)atoi(gopt.optarg);
             break;
-        case 'H':
-            _initial_height = atof(gopt.optarg);
-            break;
         case 'C':
-            HALSITL::SITLUARTDriver::_console = true;
+            HALSITL::UARTDriver::_console = true;
             break;
         case 'I': {
-            uint8_t instance = atoi(gopt.optarg);
-            _base_port  += instance * 10;
-            _rcout_port += instance * 10;
-            _simin_port += instance * 10;
+            _instance = atoi(gopt.optarg);
+            _base_port  += _instance * 10;
+            _rcout_port += _instance * 10;
+            _simin_port += _instance * 10;
         }
         break;
         case 'P':
@@ -130,26 +185,55 @@ void SITL_State::_parse_command_line(int argc, char * const argv[])
             model_str = gopt.optarg;
             break;
         case 's':
-            speedup = atof(gopt.optarg);
+            speedup = strtof(gopt.optarg, NULL);
             break;
         case 'F':
             _fdm_address = gopt.optarg;
             break;
+        case CMDLINE_CLIENT:
+            _client_address = gopt.optarg;
+            break;
+        case CMDLINE_GIMBAL:
+            enable_gimbal = true;
+            break;
+        case CMDLINE_ADSB:
+            enable_ADSB = true;
+            break;
+        case CMDLINE_AUTOTESTDIR:
+            autotest_dir = strdup(gopt.optarg);
+            break;
+        case CMDLINE_DEFAULTS:
+            defaults_path = strdup(gopt.optarg);
+            break;
+
+        case CMDLINE_UARTA:
+        case CMDLINE_UARTB:
+        case CMDLINE_UARTC:
+        case CMDLINE_UARTD:
+        case CMDLINE_UARTE:
+            _uart_path[opt - CMDLINE_UARTA] = gopt.optarg;
+            break;
+            
         default:
             _usage();
             exit(1);
         }
     }
 
-    if (model_str && home_str) {
-        for (uint8_t i=0; i<sizeof(model_constructors)/sizeof(model_constructors[0]); i++) {
-            if (strncmp(model_constructors[i].name, model_str, strlen(model_constructors[i].name)) == 0) {
-                sitl_model = model_constructors[i].constructor(home_str, model_str);
-                sitl_model->set_speedup(speedup);
-                _synthetic_clock_mode = true;
-                printf("Started model %s at %s at speed %.1f\n", model_str, home_str, speedup);
-                break;
-            }
+    if (!model_str) {
+        printf("You must specify a vehicle model\n");
+        exit(1);
+    }
+
+    for (uint8_t i=0; i < ARRAY_SIZE(model_constructors); i++) {
+        if (strncasecmp(model_constructors[i].name, model_str, strlen(model_constructors[i].name)) == 0) {
+            sitl_model = model_constructors[i].constructor(home_str, model_str);
+            sitl_model->set_speedup(speedup);
+            sitl_model->set_instance(_instance);
+            sitl_model->set_autotest_dir(autotest_dir);
+            _synthetic_clock_mode = true;
+            printf("Started model %s at %s at speed %.1f\n", model_str, home_str, speedup);
+            break;
         }
     }
 
@@ -174,7 +258,7 @@ void SITL_State::_parse_command_line(int argc, char * const argv[])
         }
     }
 
-    _sitl_setup();
+    _sitl_setup(home_str);
 }
 
 #endif

@@ -1,6 +1,4 @@
-#include <MsgHandler.h>
-
-extern const AP_HAL::HAL& hal;
+#include "MsgHandler.h"
 
 void fatal(const char *msg) {
     ::printf("%s",msg);
@@ -46,6 +44,8 @@ void MsgHandler::init_field_types()
     add_field_type('M', sizeof(uint8_t));
     add_field_type('N', sizeof(char[16]));
     add_field_type('Z', sizeof(char[64]));
+    add_field_type('q', sizeof(int64_t));
+    add_field_type('Q', sizeof(uint64_t));
 }
 
 struct MsgHandler::format_field_info *MsgHandler::find_field_info(const char *label)
@@ -58,14 +58,11 @@ struct MsgHandler::format_field_info *MsgHandler::find_field_info(const char *la
     return NULL;
 }
 
-MsgHandler::MsgHandler(struct log_Format &_f, DataFlash_Class &_dataflash,
-                       uint64_t &_last_timestamp_usec)
-    : next_field(0), f(_f), dataflash(_dataflash), last_timestamp_usec(_last_timestamp_usec)
+MsgHandler::MsgHandler(const struct log_Format &_f) : next_field(0), f(_f)
 {
     init_field_types();
     parse_format_fields();
 }
-
 
 void MsgHandler::add_field(const char *_label, uint8_t _type, uint8_t _offset,
                           uint8_t _length)
@@ -101,9 +98,8 @@ void MsgHandler::parse_format_fields()
     }
 
     if (label_offset != strlen(f.format)) {
-	    free(labels);
-	    printf("too few labels for format (format=%s) (labels=%s)\n",
-		   f.format, f.labels);
+        printf("too few labels for format (format=%s) (labels=%s)\n",
+               f.format, f.labels);
     }
 
     free(labels);
@@ -193,16 +189,6 @@ MsgHandler::~MsgHandler()
     }
 }
 
-extern uint64_t last_timestamp_usec; // fixme!
-
-void MsgHandler::wait_timestamp(uint32_t timestamp)
-{
-    uint64_t timestamp_usec = timestamp*1000UL;
-    timestamp_usec = ((timestamp_usec + 1000) / 2500) * 2500;
-    last_timestamp_usec = timestamp_usec;
-    hal.scheduler->stop_clock(timestamp_usec);
-}
-
 void MsgHandler::location_from_msg(uint8_t *msg,
                                   Location &loc,
                                   const char *label_lat,
@@ -241,13 +227,20 @@ void MsgHandler::attitude_from_msg(uint8_t *msg,
     att[2] = require_field_uint16_t(msg, label_yaw) * 0.01f;
 }
 
+void MsgHandler::field_not_found(uint8_t *msg, const char *label)
+{
+    char all_labels[256];
+    uint8_t type = msg[2];
+    string_for_labels(all_labels, 256);
+    ::printf("Field (%s) not found for id=%d; options are (%s)\n",
+             label, type, all_labels);
+    abort();
+}
+
 void MsgHandler::require_field(uint8_t *msg, const char *label, char *buffer, uint8_t bufferlen)
 {
     if (! field_value(msg, label, buffer, bufferlen)) {
-        char all_labels[256];
-        string_for_labels(all_labels, 256);
-        ::printf("Field (%s) not found; options are (%s)\n", label, all_labels);
-        exit(1);
+        field_not_found(msg,label);
     }
 }
 
@@ -280,11 +273,4 @@ int16_t MsgHandler::require_field_int16_t(uint8_t *msg, const char *label)
     int16_t ret;
     require_field(msg, label, ret);
     return ret;
-}
-
-void MsgHandler::wait_timestamp_from_msg(uint8_t *msg)
-{
-    uint32_t timestamp;
-    require_field(msg, "TimeMS", timestamp);
-    wait_timestamp(timestamp);
 }

@@ -20,7 +20,7 @@
 /* 
    FRSKY Telemetry library
 */
-#include <AP_Frsky_Telem.h>
+#include "AP_Frsky_Telem.h"
 extern const AP_HAL::HAL& hal;
 
 //constructor
@@ -84,7 +84,7 @@ void AP_Frsky_Telem::init(const AP_SerialManager& serial_manager)
         _mode_data_ready = false;
         _sats_data_ready = false;
         _sport_status = 0;
-        hal.scheduler->register_io_process(AP_HAL_MEMBERPROC(&AP_Frsky_Telem::sport_tick));
+        hal.scheduler->register_io_process(FUNCTOR_BIND_MEMBER(&AP_Frsky_Telem::sport_tick, void));
     }
 
     if (_port != NULL) {
@@ -156,7 +156,7 @@ void AP_Frsky_Telem::init_uart_for_sport()
 */
 void AP_Frsky_Telem::send_hub_frame()
 {
-    uint32_t now = hal.scheduler->millis();
+    uint32_t now = AP_HAL::millis();
 
     // send frame1 every 200ms
     if (now - _last_frame1_ms > 200) {

@@ -17,21 +17,24 @@
   parent class for aircraft simulators
 */
 
-#include <AP_HAL.h>
-#if CONFIG_HAL_BOARD == HAL_BOARD_SITL
-#include <AP_Common.h>
 #include "SIM_Aircraft.h"
-#include <unistd.h>
-#include <sys/time.h>
+
 #include <stdio.h>
+#include <sys/time.h>
+#include <unistd.h>
+
+#ifdef __CYGWIN__
+#include <windows.h>
+#include <time.h>
+#include <Mmsystem.h>
+#endif
+
+namespace SITL {
 
 /*
   parent class for all simulator types
  */
 
-/*
-  constructor
- */
 Aircraft::Aircraft(const char *home_str, const char *frame_str) :
     ground_level(0),
     frame_height(0),
@@ -43,29 +46,66 @@ Aircraft::Aircraft(const char *home_str, const char *frame_str) :
     time_now_us(0),
     gyro_noise(radians(0.1f)),
     accel_noise(0.3),
-    rate_hz(400),
-    last_time_us(0)
+    rate_hz(1200),
+    autotest_dir(NULL),
+    frame(frame_str),
+#ifdef __CYGWIN__
+    min_sleep_time(20000)
+#else
+    min_sleep_time(5000)
+#endif
 {
-    char *saveptr=NULL;
-    char *s = strdup(home_str);
-    char *lat_s = strtok_r(s, ",", &saveptr);
-    char *lon_s = strtok_r(NULL, ",", &saveptr);
-    char *alt_s = strtok_r(NULL, ",", &saveptr);
-    char *yaw_s = strtok_r(NULL, ",", &saveptr);
-
-    memset(&home, 0, sizeof(home));
-    home.lat = atof(lat_s) * 1.0e7;
-    home.lng = atof(lon_s) * 1.0e7;
-    home.alt = atof(alt_s) * 1.0e2;
+    parse_home(home_str, home, home_yaw);
     location = home;
     ground_level = home.alt*0.01;
 
-    dcm.from_euler(0, 0, atof(yaw_s));
-    free(s);
+    dcm.from_euler(0, 0, radians(home_yaw));
 
     set_speedup(1);
+
+    last_wall_time_us = get_wall_time_us();
+    frame_counter = 0;
 }
 
+
+/*
+  parse a home string into a location and yaw
+ */
+bool Aircraft::parse_home(const char *home_str, Location &loc, float &yaw_degrees)
+{
+    char *saveptr=NULL;
+    char *s = strdup(home_str);
+    if (!s) {
+        return false;
+    }
+    char *lat_s = strtok_r(s, ",", &saveptr);
+    if (!lat_s) {
+        return false;
+    }
+    char *lon_s = strtok_r(NULL, ",", &saveptr);
+    if (!lon_s) {
+        return false;
+    }
+    char *alt_s = strtok_r(NULL, ",", &saveptr);
+    if (!alt_s) {
+        return false;
+    }
+    char *yaw_s = strtok_r(NULL, ",", &saveptr);
+    if (!yaw_s) {
+        return false;
+    }
+
+    memset(&loc, 0, sizeof(loc));
+    loc.lat = strtof(lat_s, NULL) * 1.0e7;
+    loc.lng = strtof(lon_s, NULL) * 1.0e7;
+    loc.alt = strtof(alt_s, NULL) * 1.0e2;
+
+    yaw_degrees = strtof(yaw_s, NULL);
+    free(s);
+
+    return true;
+}
+    
 /*
    return true if we are on the ground
 */
@@ -93,7 +133,9 @@ void Aircraft::update_position(void)
         time_now_us += frame_time_us;
     }
     last_time_us = time_now_us;
-    sync_frame_time();
+    if (use_time_sync) {
+        sync_frame_time();
+    }
 }
 
 /*
@@ -129,33 +171,46 @@ void Aircraft::setup_frame_time(float new_rate, float new_speedup)
 /* adjust frame_time calculation */
 void Aircraft::adjust_frame_time(float new_rate)
 {
-    rate_hz = new_rate;
-    frame_time_us = 1.0e6f/rate_hz;
-    scaled_frame_time_us = frame_time_us/target_speedup;
+    if (rate_hz != new_rate) {
+        rate_hz = new_rate;
+        frame_time_us = 1.0e6f/rate_hz;
+        scaled_frame_time_us = frame_time_us/target_speedup;
+    }
 }
 
-/* try to synchronise simulation time with wall clock time, taking
-   into account desired speedup */
+/*
+   try to synchronise simulation time with wall clock time, taking
+   into account desired speedup
+   This tries to take account of possible granularity of
+   get_wall_time_us() so it works reasonably well on windows
+*/
 void Aircraft::sync_frame_time(void)
 {
+    frame_counter++;
     uint64_t now = get_wall_time_us();
-    uint64_t dt_us = now - last_wall_time_us;
-    if (dt_us < scaled_frame_time_us) {
-        usleep(scaled_frame_time_us - dt_us);
-        now = get_wall_time_us();
-
-        if (now > last_wall_time_us && now - last_wall_time_us < 1.0e5) {
-            float rate = 1.0e6f/(now - last_wall_time_us);
-            achieved_rate_hz = (0.98f*achieved_rate_hz) + (0.02f*rate);
-            if (achieved_rate_hz < rate_hz * target_speedup) {
-                scaled_frame_time_us *= 0.999;
-            } else {
-                scaled_frame_time_us *= 1.001;
-            }
+    if (frame_counter >= 40 &&
+        now > last_wall_time_us) {
+        float rate = frame_counter * 1.0e6f/(now - last_wall_time_us);
+        achieved_rate_hz = (0.99f*achieved_rate_hz) + (0.01f*rate);
+        if (achieved_rate_hz < rate_hz * target_speedup) {
+            scaled_frame_time_us *= 0.999f;
+        } else {
+            scaled_frame_time_us /= 0.999f;
         }
-
+#if 0
+        ::printf("achieved_rate_hz=%.3f rate=%.2f rate_hz=%.3f sft=%.1f\n",
+                 (double)achieved_rate_hz,
+                 (double)rate,
+                 (double)rate_hz,
+                 (double)scaled_frame_time_us);
+#endif
+        uint32_t sleep_time = scaled_frame_time_us*frame_counter;
+        if (sleep_time > min_sleep_time) {
+            usleep(sleep_time);
+        }
+        last_wall_time_us = now;
+        frame_counter = 0;
     }
-    last_wall_time_us = now;
 }
 
 /* add noise based on throttle level (from 0..1) */
@@ -163,10 +218,10 @@ void Aircraft::add_noise(float throttle)
 {
     gyro += Vector3f(rand_normal(0, 1),
                      rand_normal(0, 1),
-                     rand_normal(0, 1)) * gyro_noise * throttle;
+                     rand_normal(0, 1)) * gyro_noise * fabsf(throttle);
     accel_body += Vector3f(rand_normal(0, 1),
                            rand_normal(0, 1),
-                           rand_normal(0, 1)) * accel_noise * throttle;
+                           rand_normal(0, 1)) * accel_noise * fabsf(throttle);
 }
 
 /*
@@ -224,24 +279,39 @@ void Aircraft::fill_fdm(struct sitl_fdm &fdm) const
     fdm.xAccel    = accel_body.x;
     fdm.yAccel    = accel_body.y;
     fdm.zAccel    = accel_body.z;
-    Vector3f gyro_ef = SITL::convert_earth_frame(dcm, gyro);
-    fdm.rollRate  = degrees(gyro_ef.x);
-    fdm.pitchRate = degrees(gyro_ef.y);
-    fdm.yawRate   = degrees(gyro_ef.z);
+    fdm.rollRate  = degrees(gyro.x);
+    fdm.pitchRate = degrees(gyro.y);
+    fdm.yawRate   = degrees(gyro.z);
     float r, p, y;
     dcm.to_euler(&r, &p, &y);
     fdm.rollDeg  = degrees(r);
     fdm.pitchDeg = degrees(p);
     fdm.yawDeg   = degrees(y);
-    fdm.airspeed = velocity_ef.length();
-    fdm.magic = 0x4c56414f;
+    fdm.airspeed = airspeed;
+    fdm.battery_voltage = battery_voltage;
+    fdm.battery_current = battery_current;
+    fdm.rpm1 = rpm1;
+    fdm.rpm2 = rpm2;
 }
 
 uint64_t Aircraft::get_wall_time_us() const
 {
+#ifdef __CYGWIN__
+    static DWORD tPrev;
+    static uint64_t last_ret_us;
+    if (tPrev == 0) {
+        tPrev = timeGetTime();
+        return 0;
+    }
+    DWORD now = timeGetTime();
+    last_ret_us += (uint64_t)((now - tPrev)*1000UL);
+    tPrev = now;
+    return last_ret_us;
+#else
     struct timeval tp;
     gettimeofday(&tp,NULL);
     return tp.tv_sec*1.0e6 + tp.tv_usec;
+#endif
 }
 
 /*
@@ -251,4 +321,52 @@ void Aircraft::set_speedup(float speedup)
 {
     setup_frame_time(rate_hz, speedup);
 }
-#endif // CONFIG_HAL_BOARD
+
+/*
+  update the simulation attitude and relative position
+ */
+void Aircraft::update_dynamics(const Vector3f &rot_accel)
+{
+    float delta_time = frame_time_us * 1.0e-6f;
+
+    // update rotational rates in body frame
+    gyro += rot_accel * delta_time;
+
+    // update attitude
+    dcm.rotate(gyro * delta_time);
+    dcm.normalize();
+
+    Vector3f accel_earth = dcm * accel_body;
+    accel_earth += Vector3f(0, 0, GRAVITY_MSS);
+
+    // if we're on the ground, then our vertical acceleration is limited
+    // to zero. This effectively adds the force of the ground on the aircraft
+    if (on_ground(position) && accel_earth.z > 0) {
+        accel_earth.z = 0;
+    }
+
+    // work out acceleration as seen by the accelerometers. It sees the kinematic
+    // acceleration (ie. real movement), plus gravity
+    accel_body = dcm.transposed() * (accel_earth + Vector3f(0, 0, -GRAVITY_MSS));
+
+    // new velocity vector
+    velocity_ef += accel_earth * delta_time;
+
+    // new position vector
+    Vector3f old_position = position;
+    position += velocity_ef * delta_time;
+
+    // assume zero wind for now
+    airspeed = velocity_ef.length();
+
+    // constrain height to the ground
+    if (on_ground(position)) {
+        if (!on_ground(old_position) && AP_HAL::millis() - last_ground_contact_ms > 1000) {
+            printf("Hit ground at %f m/s\n", velocity_ef.z);
+            last_ground_contact_ms = AP_HAL::millis();
+        }
+        position.z = -(ground_level + frame_height - home.alt*0.01f);
+    }
+}
+    
+} // namespace SITL

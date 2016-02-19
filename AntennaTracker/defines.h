@@ -3,10 +3,6 @@
 #ifndef _DEFINES_H
 #define _DEFINES_H
 
-// mark a function as not to be inlined
-#define NOINLINE __attribute__((noinline))
-
-
 // Command/Waypoint/Location Options Bitmask
 //--------------------
 #define MASK_OPTIONS_RELATIVE_ALT       (1<<0)          // 1 = Relative
@@ -26,8 +22,18 @@ enum ControlMode {
 
 enum ServoType {
     SERVO_TYPE_POSITION=0,
-    SERVO_TYPE_ONOFF=1
+    SERVO_TYPE_ONOFF=1,
+    SERVO_TYPE_CR=2
 };
+
+//  Logging parameters
+#define MASK_LOG_ATTITUDE               (1<<0)
+#define MASK_LOG_GPS                    (1<<1)
+#define MASK_LOG_RCIN                   (1<<2)
+#define MASK_LOG_IMU                    (1<<3)
+#define MASK_LOG_RCOUT                  (1<<4)
+#define MASK_LOG_COMPASS                (1<<5)
+#define MASK_LOG_ANY                    0xFFFF
 
 #endif // _DEFINES_H
 
